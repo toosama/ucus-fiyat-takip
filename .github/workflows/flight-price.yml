@@ -1,4 +1,4 @@
-name: Pegasus Sayfa Testi
+name: Pegasus Fiyat Takibi
 
 on:
   workflow_dispatch:
@@ -7,182 +7,45 @@ permissions:
   contents: read
 
 jobs:
-  test-pegasus:
+  telegram-test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Node.js kur
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Playwright kur
+      - name: Telegram test mesajı gönder
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          npm init -y
-          npm install playwright
-          npx playwright install --with-deps chromium
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "HATA: TELEGRAM_BOT_TOKEN Secret bulunamadı."
+            exit 1
+          fi
 
-      - name: Pegasus doğru sayfayı test et
-        run: |
-          cat > test.js <<'EOF'
-          const { chromium } = require("playwright");
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "HATA: TELEGRAM_CHAT_ID Secret bulunamadı."
+            exit 1
+          fi
 
-          (async () => {
-            const browser = await chromium.launch({
-              headless: true,
-              args: [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage"
-              ]
-            });
+          MESSAGE="🟢 PEGASUS FİYAT TAKİBİ AKTİF
 
-            const context = await browser.newContext({
-              locale: "tr-TR",
-              timezoneId: "Europe/Istanbul",
-              viewport: {
-                width: 1440,
-                height: 1200
-              }
-            });
+16 Ağustos 2026
+Çukurova (COV) → Sabiha Gökçen (SAW)
+08:15 → 09:50
 
-            const page = await context.newPage();
+GitHub Actions çalışıyor.
+Telegram bağlantısı başarılı.
 
-            try {
-              const url =
-                "https://www.flypgs.com/sehirler/adana-istanbul-ucak-bileti";
+Fiyat kontrol sistemi hazır."
 
-              console.log("Pegasus sayfası açılıyor:");
-              console.log(url);
+          RESPONSE=$(curl -sS \
+            -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            --data "$(python3 -c 'import json,sys; print(json.dumps({"chat_id":sys.argv[1],"text":sys.argv[2]}))' "$TELEGRAM_CHAT_ID" "$MESSAGE")")
 
-              const response = await page.goto(url, {
-                waitUntil: "domcontentloaded",
-                timeout: 90000
-              });
+          echo "Telegram cevabı:"
+          echo "$RESPONSE"
 
-              console.log(
-                "HTTP:",
-                response ? response.status() : "YOK"
-              );
+          echo "$RESPONSE" | grep -q '"ok":true'
 
-              await page.waitForTimeout(10000);
-
-              console.log("");
-              console.log("========== SAYFA ==========");
-
-              console.log("URL:", page.url());
-              console.log("TITLE:", await page.title());
-
-              console.log("");
-              console.log("========== INPUTLAR ==========");
-
-              const inputs =
-                await page.locator("input").evaluateAll(
-                  els =>
-                    els.map((e, i) => ({
-                      index: i,
-                      type: e.type,
-                      name: e.name,
-                      id: e.id,
-                      placeholder: e.placeholder,
-                      aria:
-                        e.getAttribute("aria-label"),
-                      value: e.value,
-                      visible:
-                        !!(
-                          e.offsetWidth ||
-                          e.offsetHeight ||
-                          e.getClientRects().length
-                        )
-                    }))
-                );
-
-              console.log(
-                JSON.stringify(inputs, null, 2)
-              );
-
-              console.log("");
-              console.log("========== BUTONLAR ==========");
-
-              const buttons =
-                await page.locator("button").evaluateAll(
-                  els =>
-                    els.map((e, i) => ({
-                      index: i,
-                      text:
-                        (e.innerText || "")
-                          .trim()
-                          .substring(0, 200),
-                      aria:
-                        e.getAttribute("aria-label"),
-                      type: e.type,
-                      visible:
-                        !!(
-                          e.offsetWidth ||
-                          e.offsetHeight ||
-                          e.getClientRects().length
-                        )
-                    }))
-                );
-
-              console.log(
-                JSON.stringify(buttons, null, 2)
-              );
-
-              console.log("");
-              console.log("========== SAYFA METNİ ==========");
-
-              const text =
-                await page.locator("body").innerText();
-
-              console.log(
-                text.substring(0, 15000)
-              );
-
-              console.log("");
-              console.log(
-                "========== FRAME SAYISI =========="
-              );
-
-              console.log(
-                page.frames().length
-              );
-
-              for (const frame of page.frames()) {
-                console.log(
-                  "FRAME:",
-                  frame.url()
-                );
-              }
-
-              await page.screenshot({
-                path: "pegasus-test.png",
-                fullPage: true
-              });
-
-            } catch (error) {
-
-              console.error(
-                "HATA:",
-                error
-              );
-
-              process.exitCode = 1;
-
-            } finally {
-
-              await browser.close();
-
-            }
-          })();
-          EOF
-
-          node test.js
-
-      - name: Test ekran görüntüsünü yükle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pegasus-test
-          path: pegasus-test.png
-          if-no-files-found: ignore
+          echo "Telegram mesajı başarıyla gönderildi."

@@ -27,7 +27,7 @@ jobs:
           npm install playwright
           npx playwright install --with-deps chromium
 
-      - name: Uçuş fiyatını kontrol et
+      - name: Pegasus fiyatını kontrol et
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -39,16 +39,17 @@ jobs:
           const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
           const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-          const FLIGHT_DATE = "2026-08-16";
-          const STOP_DATE = "2026-08-16";
+          const FLIGHT_DATE = "16 Ağustos 2026";
+          const FLIGHT_DATE_ISO = "2026-08-16";
 
-          const FROM = "COV";
-          const TO = "SAW";
+          const FROM = "Çukurova";
+          const FROM_CODE = "COV";
+
+          const TO = "Sabiha Gökçen";
+          const TO_CODE = "SAW";
 
           const TARGET_DEPARTURE = "08:15";
           const TARGET_ARRIVAL = "09:50";
-
-          const TARGET_FLIGHT = "PC2081";
 
           async function telegram(message) {
             if (!BOT_TOKEN || !CHAT_ID) {
@@ -80,13 +81,13 @@ jobs:
           }
 
           function normalize(text) {
-            return text
+            return (text || "")
               .replace(/\u00a0/g, " ")
               .replace(/\s+/g, " ")
               .trim();
           }
 
-          function priceToNumber(text) {
+          function parsePrice(text) {
             if (!text) return null;
 
             let value = text
@@ -95,156 +96,548 @@ jobs:
 
             if (!value) return null;
 
+            /*
+             * Türkçe fiyat:
+             * 1.234,56
+             * 1234,56
+             * 1.234
+             */
+
             if (value.includes(",") && value.includes(".")) {
-              value = value.replace(/\./g, "").replace(",", ".");
+              value = value
+                .replace(/\./g, "")
+                .replace(",", ".");
             } else if (value.includes(",")) {
               value = value.replace(",", ".");
+            } else if (
+              value.includes(".") &&
+              value.split(".").pop().length === 3
+            ) {
+              value = value.replace(/\./g, "");
             }
 
-            const number = parseFloat(value);
+            const number = Number(value);
 
             if (
-              Number.isFinite(number) &&
-              number >= 100 &&
-              number <= 100000
+              !Number.isFinite(number) ||
+              number < 100 ||
+              number > 100000
             ) {
-              return number;
+              return null;
             }
 
-            return null;
+            return number;
           }
 
-          function extractPrices(text) {
-            const prices = [];
+          function findPrices(text) {
+            const results = [];
 
             const patterns = [
-              /₺\s?([\d.]+(?:,\d{1,2})?)/gi,
-              /TRY\s?([\d.]+(?:,\d{1,2})?)/gi,
-              /([\d.]+(?:,\d{1,2})?)\s?TL/gi
+              /₺\s*([\d.,]+)/gi,
+              /TL\s*([\d.,]+)/gi,
+              /([\d.,]+)\s*TL/gi,
+              /TRY\s*([\d.,]+)/gi
             ];
 
             for (const pattern of patterns) {
               for (const match of text.matchAll(pattern)) {
-                const value = priceToNumber(match[1]);
+                const price = parsePrice(match[1]);
 
-                if (value !== null) {
-                  prices.push(value);
+                if (price !== null) {
+                  results.push(price);
                 }
               }
             }
 
-            return [...new Set(prices)];
+            return [...new Set(results)];
           }
 
-          function flightMatches(text) {
-            const normalized = normalize(text);
-
-            const checks = {
-              pegasus:
-                /Pegasus/i.test(normalized),
-
-              flightNumber:
-                /PC\s*2081/i.test(normalized),
-
-              departure:
-                /08\s*[:.]\s*15/.test(normalized),
-
-              arrival:
-                /09\s*[:.]\s*50/.test(normalized),
-
-              origin:
-                /COV|Çukurova|Adana/i.test(normalized),
-
-              destination:
-                /SAW|Sabiha\s*Gökçen/i.test(normalized)
-            };
-
-            console.log("Uçuş kontrolü:", checks);
-
-            return checks.pegasus &&
-                   checks.departure &&
-                   checks.arrival &&
-                   checks.origin &&
-                   checks.destination;
+          async function safeClick(locator) {
+            try {
+              await locator.first().click({
+                timeout: 5000
+              });
+              return true;
+            } catch {
+              return false;
+            }
           }
 
-          async function findFlightCard(page) {
-            const candidates = await page.locator(
-              "div, li, article, section"
-            ).all();
+          async function closePopups(page) {
+            const possibleButtons = [
+              "Kabul Et",
+              "Tümünü Kabul Et",
+              "Kabul ediyorum",
+              "Çerezleri Kabul Et",
+              "Tamam",
+              "Kapat",
+              "×"
+            ];
 
+            for (const text of possibleButtons) {
+              try {
+                const locator = page.getByText(text, {
+                  exact: true
+                });
+
+                if (await locator.count()) {
+                  await locator.first().click({
+                    timeout: 2000
+                  }).catch(() => {});
+                }
+              } catch {}
+            }
+          }
+
+          async function chooseAirport(page, searchText, code) {
             console.log(
-              "Aday element sayısı:",
-              candidates.length
+              `Havalimanı seçiliyor: ${searchText} (${code})`
             );
 
-            for (const element of candidates) {
-              try {
-                const text = normalize(
-                  await element.innerText({
-                    timeout: 1000
-                  })
-                );
+            const candidates = [
+              page.getByPlaceholder(/Nereden|Nereye/i),
+              page.locator("input")
+            ];
 
-                if (!text || text.length < 20 || text.length > 5000) {
+            let input = null;
+
+            for (const candidate of candidates) {
+              try {
+                const count = await candidate.count();
+
+                for (let i = 0; i < count; i++) {
+                  const item = candidate.nth(i);
+
+                  if (await item.isVisible()) {
+                    input = item;
+                    break;
+                  }
+                }
+
+                if (input) break;
+              } catch {}
+            }
+
+            if (!input) {
+              throw new Error(
+                `${searchText} için input bulunamadı.`
+              );
+            }
+
+            await input.click();
+            await input.fill(searchText);
+
+            await page.waitForTimeout(2500);
+
+            /*
+             * Açılan önerilerde COV/SAW veya şehir adını ara.
+             */
+
+            const bodyText =
+              normalize(
+                await page.locator("body").innerText()
+              );
+
+            console.log(
+              `Önerilerde ${code} aranıyor.`
+            );
+
+            const options = page.locator(
+              '[role="option"], li, button, div'
+            );
+
+            const count =
+              Math.min(
+                await options.count(),
+                500
+              );
+
+            for (let i = 0; i < count; i++) {
+              try {
+                const option = options.nth(i);
+
+                if (!(await option.isVisible())) {
                   continue;
                 }
 
-                if (
-                  /08\s*[:.]\s*15/.test(text) &&
-                  /09\s*[:.]\s*50/.test(text) &&
-                  /Pegasus/i.test(text)
-                ) {
-                  console.log(
-                    "Hedef uçuş kartı bulundu:"
+                const text =
+                  normalize(
+                    await option.innerText({
+                      timeout: 500
+                    })
                   );
 
-                  console.log(text);
+                if (
+                  text &&
+                  (
+                    text.includes(code) ||
+                    new RegExp(
+                      searchText,
+                      "i"
+                    ).test(text)
+                  )
+                ) {
+                  if (
+                    await option.boundingBox()
+                  ) {
+                    await option.click({
+                      timeout: 3000
+                    });
 
-                  return {
-                    text,
-                    element
-                  };
+                    await page.waitForTimeout(
+                      1000
+                    );
+
+                    return;
+                  }
                 }
-              } catch {
-                continue;
+              } catch {}
+            }
+
+            throw new Error(
+              `${searchText} (${code}) önerilerde seçilemedi.`
+            );
+          }
+
+          async function chooseDate(page) {
+            console.log(
+              "16 Ağustos 2026 tarihi seçiliyor..."
+            );
+
+            /*
+             * Tarih alanına tıklıyoruz.
+             */
+
+            const dateCandidates = [
+              page.getByText(
+                "Gidiş Tarihi",
+                { exact: true }
+              ),
+              page.getByText(
+                /Gidiş Tarihi/i
+              ),
+              page.locator(
+                'input[placeholder*="Gidiş"]'
+              )
+            ];
+
+            let clicked = false;
+
+            for (const candidate of dateCandidates) {
+              try {
+                if (await candidate.count()) {
+                  await candidate.first().click({
+                    timeout: 3000
+                  });
+
+                  clicked = true;
+                  break;
+                }
+              } catch {}
+            }
+
+            if (!clicked) {
+              console.log(
+                "Gidiş Tarihi metni bulunamadı; input aranıyor."
+              );
+
+              const inputs =
+                page.locator("input");
+
+              const count =
+                await inputs.count();
+
+              for (let i = 0; i < count; i++) {
+                const input = inputs.nth(i);
+
+                try {
+                  if (!(await input.isVisible())) {
+                    continue;
+                  }
+
+                  const placeholder =
+                    await input.getAttribute(
+                      "placeholder"
+                    );
+
+                  const aria =
+                    await input.getAttribute(
+                      "aria-label"
+                    );
+
+                  const value =
+                    await input.inputValue();
+
+                  const info =
+                    `${placeholder || ""} ${
+                      aria || ""
+                    } ${value || ""}`;
+
+                  if (
+                    /tarih|date|gidiş/i.test(
+                      info
+                    )
+                  ) {
+                    await input.click();
+                    clicked = true;
+                    break;
+                  }
+                } catch {}
               }
+            }
+
+            await page.waitForTimeout(1500);
+
+            /*
+             * Tarih picker'da Ağustos 2026'yı bul.
+             */
+
+            for (let attempt = 0; attempt < 14; attempt++) {
+              const text =
+                normalize(
+                  await page.locator("body").innerText()
+                );
+
+              if (
+                /Ağustos\s*2026/i.test(text)
+              ) {
+                break;
+              }
+
+              const nextButtons =
+                page.locator(
+                  'button[aria-label*="Next"],' +
+                  'button[aria-label*="next"],' +
+                  'button[aria-label*="İleri"],' +
+                  'button:has-text("›"),' +
+                  'button:has-text(">")'
+                );
+
+              if (
+                await nextButtons.count()
+              ) {
+                await nextButtons.last().click({
+                  timeout: 2000
+                }).catch(() => {});
+              } else {
+                break;
+              }
+
+              await page.waitForTimeout(500);
+            }
+
+            /*
+             * 16 gününü seç.
+             */
+
+            const daySelectors = [
+              '[role="gridcell"]',
+              'button',
+              'div'
+            ];
+
+            for (const selector of daySelectors) {
+              const elements =
+                page.locator(selector);
+
+              const count =
+                Math.min(
+                  await elements.count(),
+                  500
+                );
+
+              for (let i = 0; i < count; i++) {
+                try {
+                  const el =
+                    elements.nth(i);
+
+                  if (!(await el.isVisible())) {
+                    continue;
+                  }
+
+                  const text =
+                    normalize(
+                      await el.innerText({
+                        timeout: 300
+                      })
+                    );
+
+                  if (
+                    text === "16" ||
+                    text === "16\n"
+                  ) {
+                    const box =
+                      await el.boundingBox();
+
+                    if (box) {
+                      await el.click({
+                        timeout: 2000
+                      });
+
+                      await page.waitForTimeout(
+                        1000
+                      );
+
+                      console.log(
+                        "16 Ağustos seçildi."
+                      );
+
+                      return;
+                    }
+                  }
+                } catch {}
+              }
+            }
+
+            throw new Error(
+              "16 Ağustos 2026 tarih seçimi yapılamadı."
+            );
+          }
+
+          async function searchFlight(page) {
+            console.log(
+              "UCUZ UÇUŞ ARA butonu aranıyor..."
+            );
+
+            const buttons = [
+              page.getByRole("button", {
+                name: /UCUZ UÇUŞ ARA/i
+              }),
+              page.getByText(
+                "UCUZ UÇUŞ ARA",
+                { exact: true }
+              )
+            ];
+
+            for (const button of buttons) {
+              try {
+                if (await button.count()) {
+                  await button.first().click({
+                    timeout: 5000
+                  });
+
+                  console.log(
+                    "Uçuş araması başlatıldı."
+                  );
+
+                  return;
+                }
+              } catch {}
+            }
+
+            throw new Error(
+              "UCUZ UÇUŞ ARA butonu bulunamadı."
+            );
+          }
+
+          async function findTargetFlight(page) {
+            console.log(
+              "Uçuş sonuçları bekleniyor..."
+            );
+
+            await page.waitForTimeout(10000);
+
+            for (let i = 0; i < 12; i++) {
+              const text =
+                normalize(
+                  await page.locator("body").innerText()
+                );
+
+              console.log(
+                `Sonuç kontrolü ${i + 1}/12`
+              );
+
+              /*
+               * Hedef saatlerin ikisini birlikte arıyoruz.
+               */
+
+              if (
+                /08\s*[:.]\s*15/.test(text) &&
+                /09\s*[:.]\s*50/.test(text)
+              ) {
+                console.log(
+                  "08:15 ve 09:50 bulundu."
+                );
+
+                /*
+                 * Hedef saatleri içeren en küçük
+                 * anlamlı container'ı bul.
+                 */
+
+                const containers =
+                  page.locator(
+                    "article, li, [role='listitem'], div"
+                  );
+
+                const count =
+                  Math.min(
+                    await containers.count(),
+                    1000
+                  );
+
+                for (let j = 0; j < count; j++) {
+                  try {
+                    const element =
+                      containers.nth(j);
+
+                    if (
+                      !(await element.isVisible())
+                    ) {
+                      continue;
+                    }
+
+                    const elementText =
+                      normalize(
+                        await element.innerText({
+                          timeout: 300
+                        })
+                      );
+
+                    if (
+                      elementText.length < 30 ||
+                      elementText.length > 3000
+                    ) {
+                      continue;
+                    }
+
+                    if (
+                      /08\s*[:.]\s*15/.test(
+                        elementText
+                      ) &&
+                      /09\s*[:.]\s*50/.test(
+                        elementText
+                      )
+                    ) {
+                      return {
+                        text: elementText,
+                        element
+                      };
+                    }
+                  } catch {}
+                }
+
+                return {
+                  text,
+                  element: null
+                };
+              }
+
+              await page.waitForTimeout(5000);
             }
 
             return null;
           }
 
           (async () => {
-            const now = new Date();
-
-            const turkeyDate =
-              new Intl.DateTimeFormat("en-CA", {
-                timeZone: "Europe/Istanbul",
-                year: "numeric",
-                month: "2-digit",
-                day: "2-digit"
-              }).format(now);
-
-            console.log(
-              "Türkiye tarihi:",
-              turkeyDate
-            );
-
-            if (turkeyDate > STOP_DATE) {
-              console.log(
-                "Takip süresi sona erdi."
-              );
-              return;
-            }
-
-            const browser = await chromium.launch({
-              headless: true,
-              args: [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage"
-              ]
-            });
+            const browser =
+              await chromium.launch({
+                headless: true,
+                args: [
+                  "--no-sandbox",
+                  "--disable-setuid-sandbox",
+                  "--disable-dev-shm-usage"
+                ]
+              });
 
             const context =
               await browser.newContext({
@@ -262,154 +655,247 @@ jobs:
               await context.newPage();
 
             try {
-              const url =
-                "https://www.trip.com/flights/airport-cov-saw/?date=2026-08-16&curr=TRY&locale=tr-TR";
-
               console.log(
-                "Trip.com açılıyor..."
+                "Pegasus resmi sitesi açılıyor..."
               );
 
-              console.log(url);
-
-              const response =
-                await page.goto(url, {
+              await page.goto(
+                "https://www.flypgs.com/",
+                {
                   waitUntil: "domcontentloaded",
                   timeout: 90000
-                });
-
-              console.log(
-                "HTTP:",
-                response
-                  ? response.status()
-                  : "bilinmiyor"
-              );
-
-              await page.waitForTimeout(15000);
-
-              /*
-               * Sayfanın yüklenmesini biraz daha bekliyoruz.
-               */
-
-              await page.evaluate(
-                () => window.scrollTo(
-                  0,
-                  document.body.scrollHeight
-                )
+                }
               );
 
               await page.waitForTimeout(5000);
 
+              await closePopups(page);
+
+              console.log(
+                "Nereden seçiliyor..."
+              );
+
+              await chooseAirport(
+                page,
+                FROM,
+                FROM_CODE
+              );
+
+              console.log(
+                "Nereye seçiliyor..."
+              );
+
               /*
-               * Önce gerçek uçuş kartını bulmaya çalış.
+               * Nereye inputunu ayrıca seç.
                */
 
-              const flight =
-                await findFlightCard(page);
+              const inputs =
+                page.locator("input");
 
-              if (!flight) {
-                const rawText =
-                  await page.locator(
-                    "body"
-                  ).innerText();
+              const visibleInputs = [];
 
-                const text =
-                  normalize(rawText);
+              const inputCount =
+                await inputs.count();
 
-                console.log(
-                  "Hedef uçuş bulunamadı."
+              for (
+                let i = 0;
+                i < inputCount;
+                i++
+              ) {
+                try {
+                  if (
+                    await inputs
+                      .nth(i)
+                      .isVisible()
+                  ) {
+                    visibleInputs.push(
+                      inputs.nth(i)
+                    );
+                  }
+                } catch {}
+              }
+
+              console.log(
+                "Görünür input sayısı:",
+                visibleInputs.length
+              );
+
+              if (
+                visibleInputs.length >= 2
+              ) {
+                const destination =
+                  visibleInputs[
+                    visibleInputs.length - 1
+                  ];
+
+                await destination.click();
+
+                await destination.fill(
+                  TO
                 );
 
-                console.log(
-                  "Sayfa uzunluğu:",
-                  text.length
+                await page.waitForTimeout(
+                  2000
                 );
 
-                console.log(
-                  text.substring(
-                    0,
-                    20000
-                  )
+                const options =
+                  page.locator(
+                    '[role="option"], li, button'
+                  );
+
+                const optionCount =
+                  Math.min(
+                    await options.count(),
+                    500
+                  );
+
+                let selected = false;
+
+                for (
+                  let i = 0;
+                  i < optionCount;
+                  i++
+                ) {
+                  try {
+                    const option =
+                      options.nth(i);
+
+                    if (
+                      !(await option.isVisible())
+                    ) {
+                      continue;
+                    }
+
+                    const text =
+                      normalize(
+                        await option.innerText({
+                          timeout: 300
+                        })
+                      );
+
+                    if (
+                      /SAW/i.test(text) ||
+                      /Sabiha\s*Gökçen/i.test(
+                        text
+                      )
+                    ) {
+                      await option.click({
+                        timeout: 3000
+                      });
+
+                      selected = true;
+                      break;
+                    }
+                  } catch {}
+                }
+
+                if (!selected) {
+                  throw new Error(
+                    "SAW / Sabiha Gökçen seçilemedi."
+                  );
+                }
+              } else {
+                throw new Error(
+                  "Nereye inputu bulunamadı."
+                );
+              }
+
+              await chooseDate(page);
+
+              await searchFlight(page);
+
+              /*
+               * Sonuç sayfasının yüklenmesini bekle.
+               */
+
+              await page.waitForTimeout(
+                12000
+              );
+
+              const target =
+                await findTargetFlight(
+                  page
                 );
 
-                /*
-                 * Debug amacıyla ekran görüntüsü
-                 * GitHub Actions artifact olarak
-                 * saklanabilir.
-                 */
-
+              if (!target) {
                 await page.screenshot({
                   path:
                     "pegasus-debug.png",
                   fullPage: true
                 });
 
+                fs.writeFileSync(
+                  "pegasus-debug.txt",
+                  normalize(
+                    await page
+                      .locator("body")
+                      .innerText()
+                  )
+                );
+
                 await telegram(
                   "⚠️ Pegasus fiyat kontrolü\n\n" +
-                  "16 Ağustos 2026\n" +
-                  "Çukurova (COV) → Sabiha Gökçen (SAW)\n" +
-                  "08:15 → 09:50\n\n" +
-                  "Hedef uçuş Trip.com sonuçlarında doğrulanamadı.\n\n" +
+                  `${FLIGHT_DATE}\n` +
+                  `${FROM} (${FROM_CODE}) → ${TO} (${TO_CODE})\n` +
+                  `${TARGET_DEPARTURE} → ${TARGET_ARRIVAL}\n\n` +
+                  "Pegasus resmi sitesinde arama yapıldı ancak hedef uçuş sonuçlarda bulunamadı.\n\n" +
+                  "Debug dosyası oluşturuldu.\n" +
                   "Kontrol devam edecek."
                 );
 
                 return;
               }
 
-              /*
-               * Hedef uçuş bulundu.
-               */
-
               console.log(
                 "HEDEF UÇUŞ BULUNDU:"
               );
 
               console.log(
-                flight.text
+                target.text
               );
 
-              /*
-               * Önce uçuş kartının içindeki fiyatları
-               * almaya çalışıyoruz.
-               */
-
               const prices =
-                extractPrices(
-                  flight.text
+                findPrices(
+                  target.text
                 );
 
               console.log(
-                "Kart fiyatları:",
+                "Hedef kartındaki fiyatlar:",
                 prices
               );
-
-              /*
-               * Kartta fiyat yoksa tüm sayfada ara.
-               */
 
               let price =
                 prices.length
                   ? Math.min(...prices)
                   : null;
 
+              /*
+               * Karttan fiyat alınamazsa,
+               * hedef saatlerin yakınındaki metni
+               * incele.
+               */
+
               if (!price) {
                 const pageText =
                   normalize(
-                    await page.locator(
-                      "body"
-                    ).innerText()
+                    await page
+                      .locator("body")
+                      .innerText()
                   );
 
                 const pagePrices =
-                  extractPrices(
+                  findPrices(
                     pageText
                   );
 
                 console.log(
-                  "Sayfa fiyatları:",
+                  "Sayfadaki fiyatlar:",
                   pagePrices
                 );
 
-                if (pagePrices.length) {
+                if (
+                  pagePrices.length
+                ) {
                   price =
                     Math.min(
                       ...pagePrices
@@ -418,17 +904,23 @@ jobs:
               }
 
               if (!price) {
-                console.log(
-                  "Uçuş bulundu fakat fiyat alınamadı."
+                await page.screenshot({
+                  path:
+                    "pegasus-debug.png",
+                  fullPage: true
+                });
+
+                fs.writeFileSync(
+                  "pegasus-debug.txt",
+                  target.text
                 );
 
                 await telegram(
                   "⚠️ Pegasus fiyat kontrolü\n\n" +
-                  "Hedef uçuş bulundu:\n" +
-                  "16 Ağustos 2026\n" +
-                  "COV → SAW\n" +
-                  "08:15 → 09:50\n\n" +
-                  "Ancak fiyat bilgisi alınamadı."
+                  `${FLIGHT_DATE}\n` +
+                  `${FROM} (${FROM_CODE}) → ${TO} (${TO_CODE})\n` +
+                  `${TARGET_DEPARTURE} → ${TARGET_ARRIVAL}\n\n` +
+                  "Hedef uçuş bulundu fakat fiyat okunamadı."
                 );
 
                 return;
@@ -455,7 +947,7 @@ jobs:
                   ).trim();
 
                 const parsed =
-                  parseFloat(old);
+                  Number(old);
 
                 if (
                   Number.isFinite(parsed)
@@ -469,27 +961,17 @@ jobs:
                 String(price)
               );
 
-              /*
-               * İlk fiyat.
-               */
-
               if (
                 oldPrice === null
               ) {
                 await telegram(
                   "✈️ PEGASUS FİYAT TAKİBİ BAŞLADI\n\n" +
-                  "16 Ağustos 2026\n" +
-                  "Çukurova (COV) → Sabiha Gökçen (SAW)\n" +
-                  "08:15 → 09:50\n\n" +
+                  `${FLIGHT_DATE}\n` +
+                  `${FROM} (${FROM_CODE}) → ${TO} (${TO_CODE})\n` +
+                  `${TARGET_DEPARTURE} → ${TARGET_ARRIVAL}\n\n` +
                   `Güncel fiyat: ${price.toLocaleString("tr-TR")} TL`
                 );
-              }
-
-              /*
-               * Fiyat değişti.
-               */
-
-              else if (
+              } else if (
                 price !== oldPrice
               ) {
                 const difference =
@@ -503,16 +985,14 @@ jobs:
                 await telegram(
                   "🔔 PEGASUS FİYAT DEĞİŞTİ\n\n" +
                   `${direction}\n\n` +
-                  "16 Ağustos 2026\n" +
-                  "Çukurova (COV) → Sabiha Gökçen (SAW)\n" +
-                  "08:15 → 09:50\n\n" +
+                  `${FLIGHT_DATE}\n` +
+                  `${FROM} (${FROM_CODE}) → ${TO} (${TO_CODE})\n` +
+                  `${TARGET_DEPARTURE} → ${TARGET_ARRIVAL}\n\n` +
                   `Eski fiyat: ${oldPrice.toLocaleString("tr-TR")} TL\n` +
                   `Yeni fiyat: ${price.toLocaleString("tr-TR")} TL\n` +
                   `Değişim: ${difference > 0 ? "+" : ""}${difference.toLocaleString("tr-TR")} TL`
                 );
-              }
-
-              else {
+              } else {
                 console.log(
                   "Fiyat değişmedi:",
                   price,
@@ -523,9 +1003,17 @@ jobs:
             } catch (error) {
 
               console.error(
-                "Kontrol hatası:",
+                "KONTROL HATASI:",
                 error
               );
+
+              await page
+                .screenshot({
+                  path:
+                    "pegasus-debug.png",
+                  fullPage: true
+                })
+                .catch(() => {});
 
               await telegram(
                 "⚠️ Pegasus fiyat kontrolünde hata:\n\n" +
@@ -535,21 +1023,21 @@ jobs:
               process.exitCode = 1;
 
             } finally {
-
               await browser.close();
             }
-
           })();
           EOF
 
           node check.js
 
-      - name: Debug ekran görüntüsünü yükle
+      - name: Debug dosyalarını yükle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trip-debug
-          path: pegasus-debug.png
+          name: pegasus-debug
+          path: |
+            pegasus-debug.png
+            pegasus-debug.txt
           if-no-files-found: ignore
 
       - name: Fiyatı kaydet
@@ -557,6 +1045,11 @@ jobs:
         run: |
           git config user.name "Pegasus Price Bot"
           git config user.email "actions@github.com"
+
           git add last_price.txt || true
-          git commit -m "Uçuş fiyatı güncellendi" || true
+
+          git commit \
+            -m "Uçuş fiyatı güncellendi" \
+            || true
+
           git push || true

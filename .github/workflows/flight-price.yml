@@ -1,15 +1,13 @@
-name: Pegasus Fiyat Takibi
+name: Pegasus Form Teşhisi
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 */3 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  inspect-pegasus:
+  inspect:
     runs-on: ubuntu-latest
 
     steps:
@@ -27,43 +25,21 @@ jobs:
           npm install playwright
           npx playwright install --with-deps chromium
 
-      - name: Pegasus formunu incele
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Pegasus sayfasını derinlemesine incele
         run: |
           cat > inspect.js <<'EOF'
           const { chromium } = require("playwright");
           const fs = require("fs");
 
-          async function telegram(message) {
-            const token = process.env.TELEGRAM_BOT_TOKEN;
-            const chat = process.env.TELEGRAM_CHAT_ID;
-
-            if (!token || !chat) return;
-
-            await fetch(
-              `https://api.telegram.org/bot${token}/sendMessage`,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                  chat_id: chat,
-                  text: message
-                })
-              }
-            );
-          }
-
           (async () => {
+
             const browser = await chromium.launch({
               headless: true,
               args: [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage"
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
               ]
             });
 
@@ -73,13 +49,22 @@ jobs:
               viewport: {
                 width: 1440,
                 height: 1200
-              }
+              },
+              userAgent:
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             });
 
             const page = await context.newPage();
 
             try {
-              console.log("Pegasus açılıyor...");
+
+              console.log("");
+              console.log("======================================");
+              console.log("PEGASUS DERİN TEŞHİS BAŞLADI");
+              console.log("======================================");
+
+              console.log("");
+              console.log("1) SAYFA AÇILIYOR");
 
               await page.goto(
                 "https://www.flypgs.com/",
@@ -89,178 +74,527 @@ jobs:
                 }
               );
 
-              await page.waitForTimeout(10000);
+              console.log(
+                "URL:",
+                page.url()
+              );
 
-              console.log("Sayfa URL:");
-              console.log(page.url());
+              await page.waitForTimeout(15000);
 
-              console.log("\n========== FRAME'LER ==========");
+              console.log("");
+              console.log("2) FRAME BİLGİLERİ");
+              console.log("--------------------------------------");
 
-              for (const frame of page.frames()) {
+              const frames =
+                page.frames();
+
+              console.log(
+                "Frame sayısı:",
+                frames.length
+              );
+
+              for (
+                let i = 0;
+                i < frames.length;
+                i++
+              ) {
+
+                const frame =
+                  frames[i];
+
                 console.log(
-                  "FRAME:",
+                  `FRAME ${i}`
+                );
+
+                console.log(
+                  "URL:",
                   frame.url()
+                );
+
+                try {
+
+                  const title =
+                    await frame.title();
+
+                  console.log(
+                    "TITLE:",
+                    title
+                  );
+
+                } catch {}
+
+                console.log(
+                  "--------------------------------------"
                 );
               }
 
-              console.log(
-                "\n========== INPUTLAR =========="
-              );
+              console.log("");
+              console.log("3) ANA SAYFA ELEMENTLERİ");
+              console.log("--------------------------------------");
 
-              const inputs =
-                await page.locator("input").evaluateAll(
-                  els =>
-                    els.map((e, i) => ({
-                      index: i,
-                      type: e.type,
-                      name: e.name,
-                      id: e.id,
-                      placeholder: e.placeholder,
-                      aria: e.getAttribute(
-                        "aria-label"
-                      ),
-                      role: e.getAttribute("role"),
-                      value: e.value,
-                      visible:
-                        !!(
-                          e.offsetWidth ||
-                          e.offsetHeight ||
-                          e.getClientRects().length
-                        )
-                    }))
-                );
+              const elementInfo =
+                await page.evaluate(() => {
+
+                  const result = {
+                    inputs: [],
+                    buttons: [],
+                    selects: [],
+                    textareas: [],
+                    contenteditable: [],
+                    iframes: [],
+                    shadowHosts: []
+                  };
+
+                  document
+                    .querySelectorAll("input")
+                    .forEach((e, i) => {
+
+                      result.inputs.push({
+                        i,
+                        type: e.type,
+                        name: e.name,
+                        id: e.id,
+                        placeholder:
+                          e.placeholder,
+                        aria:
+                          e.getAttribute(
+                            "aria-label"
+                          ),
+                        value:
+                          e.value,
+                        visible:
+                          !!(
+                            e.offsetWidth ||
+                            e.offsetHeight ||
+                            e.getClientRects()
+                              .length
+                          )
+                      });
+
+                    });
+
+                  document
+                    .querySelectorAll("button")
+                    .forEach((e, i) => {
+
+                      result.buttons.push({
+                        i,
+                        text:
+                          (e.innerText || "")
+                            .trim()
+                            .substring(
+                              0,
+                              300
+                            ),
+                        type:
+                          e.type,
+                        aria:
+                          e.getAttribute(
+                            "aria-label"
+                          ),
+                        title:
+                          e.getAttribute(
+                            "title"
+                          ),
+                        visible:
+                          !!(
+                            e.offsetWidth ||
+                            e.offsetHeight ||
+                            e.getClientRects()
+                              .length
+                          )
+                      });
+
+                    });
+
+                  document
+                    .querySelectorAll("select")
+                    .forEach((e, i) => {
+
+                      result.selects.push({
+                        i,
+                        name: e.name,
+                        id: e.id,
+                        aria:
+                          e.getAttribute(
+                            "aria-label"
+                          ),
+                        visible:
+                          !!(
+                            e.offsetWidth ||
+                            e.offsetHeight ||
+                            e.getClientRects()
+                              .length
+                          )
+                      });
+
+                    });
+
+                  document
+                    .querySelectorAll("textarea")
+                    .forEach((e, i) => {
+
+                      result.textareas.push({
+                        i,
+                        placeholder:
+                          e.placeholder,
+                        aria:
+                          e.getAttribute(
+                            "aria-label"
+                          ),
+                        visible:
+                          !!(
+                            e.offsetWidth ||
+                            e.offsetHeight ||
+                            e.getClientRects()
+                              .length
+                          )
+                      });
+
+                    });
+
+                  document
+                    .querySelectorAll(
+                      "[contenteditable='true']"
+                    )
+                    .forEach((e, i) => {
+
+                      result.contenteditable.push({
+                        i,
+                        tag:
+                          e.tagName,
+                        text:
+                          (e.innerText || "")
+                            .trim()
+                            .substring(
+                              0,
+                              300
+                            ),
+                        aria:
+                          e.getAttribute(
+                            "aria-label"
+                          ),
+                        role:
+                          e.getAttribute(
+                            "role"
+                          ),
+                        visible:
+                          !!(
+                            e.offsetWidth ||
+                            e.offsetHeight ||
+                            e.getClientRects()
+                              .length
+                          )
+                      });
+
+                    });
+
+                  document
+                    .querySelectorAll("iframe")
+                    .forEach((e, i) => {
+
+                      result.iframes.push({
+                        i,
+                        src:
+                          e.getAttribute(
+                            "src"
+                          ),
+                        title:
+                          e.getAttribute(
+                            "title"
+                          ),
+                        name:
+                          e.getAttribute(
+                            "name"
+                          ),
+                        visible:
+                          !!(
+                            e.offsetWidth ||
+                            e.offsetHeight ||
+                            e.getClientRects()
+                              .length
+                          )
+                      });
+
+                    });
+
+                  /*
+                   * Shadow DOM hostlarını bul.
+                   */
+
+                  document
+                    .querySelectorAll("*")
+                    .forEach((e, i) => {
+
+                      if (e.shadowRoot) {
+
+                        result.shadowHosts.push({
+                          i,
+                          tag:
+                            e.tagName,
+                          id:
+                            e.id,
+                          class:
+                            e.className
+                        });
+
+                      }
+
+                    });
+
+                  return result;
+
+                });
+
+              console.log(
+                "INPUTS:"
+              );
 
               console.log(
                 JSON.stringify(
-                  inputs,
+                  elementInfo.inputs,
                   null,
                   2
                 )
               );
 
               console.log(
-                "\n========== BUTONLAR =========="
+                "BUTTONS:"
               );
-
-              const buttons =
-                await page.locator("button").evaluateAll(
-                  els =>
-                    els.map((e, i) => ({
-                      index: i,
-                      text:
-                        e.innerText?.trim(),
-                      aria:
-                        e.getAttribute(
-                          "aria-label"
-                        ),
-                      type: e.type,
-                      visible:
-                        !!(
-                          e.offsetWidth ||
-                          e.offsetHeight ||
-                          e.getClientRects().length
-                        )
-                    }))
-                );
 
               console.log(
                 JSON.stringify(
-                  buttons,
+                  elementInfo.buttons,
                   null,
                   2
                 )
               );
 
               console.log(
-                "\n========== TEXTAREA / CONTENTEDITABLE =========="
+                "SELECTS:"
               );
-
-              const editable =
-                await page.locator(
-                  "textarea, [contenteditable='true']"
-                ).evaluateAll(
-                  els =>
-                    els.map((e, i) => ({
-                      index: i,
-                      tag: e.tagName,
-                      text:
-                        e.innerText?.trim(),
-                      placeholder:
-                        e.getAttribute(
-                          "placeholder"
-                        ),
-                      aria:
-                        e.getAttribute(
-                          "aria-label"
-                        ),
-                      role:
-                        e.getAttribute("role"),
-                      visible:
-                        !!(
-                          e.offsetWidth ||
-                          e.offsetHeight ||
-                          e.getClientRects().length
-                        )
-                    }))
-                );
 
               console.log(
                 JSON.stringify(
-                  editable,
+                  elementInfo.selects,
                   null,
                   2
                 )
               );
 
               console.log(
-                "\n========== SAYFA METNİ =========="
+                "TEXTAREAS:"
               );
 
-              const text =
-                await page.locator(
-                  "body"
-                ).innerText();
+              console.log(
+                JSON.stringify(
+                  elementInfo.textareas,
+                  null,
+                  2
+                )
+              );
 
               console.log(
-                text.substring(
+                "CONTENTEDITABLE:"
+              );
+
+              console.log(
+                JSON.stringify(
+                  elementInfo.contenteditable,
+                  null,
+                  2
+                )
+              );
+
+              console.log(
+                "IFRAMES:"
+              );
+
+              console.log(
+                JSON.stringify(
+                  elementInfo.iframes,
+                  null,
+                  2
+                )
+              );
+
+              console.log(
+                "SHADOW HOSTS:"
+              );
+
+              console.log(
+                JSON.stringify(
+                  elementInfo.shadowHosts,
+                  null,
+                  2
+                )
+              );
+
+              console.log("");
+              console.log(
+                "4) TÜM FRAME'LERDE ELEMENT ARAMA"
+              );
+
+              console.log(
+                "--------------------------------------"
+              );
+
+              for (
+                let i = 0;
+                i < frames.length;
+                i++
+              ) {
+
+                const frame =
+                  frames[i];
+
+                console.log("");
+                console.log(
+                  `FRAME ${i}: ${frame.url()}`
+                );
+
+                try {
+
+                  const data =
+                    await frame.evaluate(() => {
+
+                      return {
+                        inputs:
+                          document
+                            .querySelectorAll(
+                              "input"
+                            )
+                            .length,
+
+                        buttons:
+                          document
+                            .querySelectorAll(
+                              "button"
+                            )
+                            .length,
+
+                        selects:
+                          document
+                            .querySelectorAll(
+                              "select"
+                            )
+                            .length,
+
+                        iframes:
+                          document
+                            .querySelectorAll(
+                              "iframe"
+                            )
+                            .length,
+
+                        text:
+                          (
+                            document.body
+                              ?.innerText || ""
+                          )
+                            .substring(
+                              0,
+                              2000
+                            )
+                      };
+
+                    });
+
+                  console.log(
+                    JSON.stringify(
+                      data,
+                      null,
+                      2
+                    )
+                  );
+
+                } catch (error) {
+
+                  console.log(
+                    "FRAME OKUMA HATASI:",
+                    error.message
+                  );
+
+                }
+
+              }
+
+              console.log("");
+              console.log(
+                "5) SAYFA METNİ"
+              );
+
+              console.log(
+                "--------------------------------------"
+              );
+
+              const bodyText =
+                await page
+                  .locator("body")
+                  .innerText();
+
+              console.log(
+                bodyText.substring(
                   0,
-                  12000
+                  20000
+                )
+              );
+
+              console.log("");
+              console.log(
+                "6) HTML BAŞLANGICI"
+              );
+
+              console.log(
+                "--------------------------------------"
+              );
+
+              const html =
+                await page.content();
+
+              console.log(
+                html.substring(
+                  0,
+                  20000
                 )
               );
 
               fs.writeFileSync(
-                "pegasus-page.txt",
-                text
+                "pegasus-html.html",
+                html
               );
 
               fs.writeFileSync(
-                "pegasus-inputs.json",
+                "pegasus-elements.json",
                 JSON.stringify(
-                  inputs,
+                  elementInfo,
                   null,
                   2
                 )
               );
 
               fs.writeFileSync(
-                "pegasus-buttons.json",
-                JSON.stringify(
-                  buttons,
-                  null,
-                  2
-                )
+                "pegasus-text.txt",
+                bodyText
               );
 
               await page.screenshot({
                 path:
-                  "pegasus-home.png",
+                  "pegasus-full.png",
                 fullPage: true
               });
 
-              await telegram(
-                "🔎 Pegasus form teşhisi tamamlandı.\n\n" +
-                "GitHub Actions logunda INPUT/BUTTON bilgileri oluşturuldu.\n\n" +
-                "Bir sonraki adımda gerçek selector'lerle uçuş araması yapılacak."
+              console.log("");
+              console.log(
+                "======================================"
+              );
+
+              console.log(
+                "TEŞHİS TAMAMLANDI"
+              );
+
+              console.log(
+                "======================================"
               );
 
             } catch (error) {
@@ -270,29 +604,27 @@ jobs:
                 error
               );
 
-              await telegram(
-                "❌ Pegasus teşhisinde hata:\n\n" +
-                error.message
-              );
-
               process.exitCode = 1;
 
             } finally {
+
               await browser.close();
+
             }
+
           })();
           EOF
 
           node inspect.js
 
-      - name: Pegasus teşhis dosyalarını yükle
+      - name: Teşhis dosyalarını yükle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pegasus-form-debug
+          name: pegasus-deep-debug
           path: |
-            pegasus-home.png
-            pegasus-page.txt
-            pegasus-inputs.json
-            pegasus-buttons.json
+            pegasus-html.html
+            pegasus-elements.json
+            pegasus-text.txt
+            pegasus-full.png
           if-no-files-found: ignore

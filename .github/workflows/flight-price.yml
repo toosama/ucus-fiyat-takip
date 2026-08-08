@@ -1,0 +1,250 @@
+name: Pegasus Fiyat Takibi
+
+on:
+  schedule:
+    - cron: "0 6,12,18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-price:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository'yi indir
+        uses: actions/checkout@v4
+
+      - name: Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Playwright kur
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Pegasus fiyatını kontrol et
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          cat > check.js <<'EOF'
+          const { chromium } = require("playwright");
+          const fs = require("fs");
+
+          const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+          const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+          async function telegram(message) {
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({
+                chat_id: CHAT_ID,
+                text: message
+              })
+            });
+          }
+
+          (async () => {
+            const browser = await chromium.launch({
+              headless: true
+            });
+
+            const page = await browser.newPage({
+              locale: "tr-TR"
+            });
+
+            try {
+              await page.goto("https://www.flypgs.com/", {
+                waitUntil: "domcontentloaded",
+                timeout: 60000
+              });
+
+              await page.waitForTimeout(5000);
+
+              // Tek yön
+              const oneWay = page.getByText("Tek Yön", {exact: true}).first();
+              if (await oneWay.count()) {
+                await oneWay.click();
+              }
+
+              // Nereden
+              const from = page.getByPlaceholder("Nereden").first();
+              await from.click();
+              await from.fill("Çukurova");
+
+              await page.waitForTimeout(2000);
+
+              const cukurova = page.getByText(/Çukurova Havalimanı/i).first();
+              await cukurova.click();
+
+              // Nereye
+              const to = page.getByPlaceholder("Nereye").first();
+              await to.click();
+              await to.fill("Sabiha Gökçen");
+
+              await page.waitForTimeout(2000);
+
+              const sabiha = page.getByText(/Sabiha Gökçen Havalimanı/i).first();
+              await sabiha.click();
+
+              // Tarih
+              const dateInput = page.locator('input').filter({
+                has: page.locator('')
+              });
+
+              // Tarih alanlarını bul
+              const inputs = await page.locator("input").evaluateAll(els =>
+                els.map(e => ({
+                  placeholder: e.placeholder,
+                  value: e.value,
+                  type: e.type,
+                  aria: e.getAttribute("aria-label")
+                }))
+              );
+
+              console.log("INPUTLAR:", inputs);
+
+              // Tarih alanına klavye ile git
+              const dateFields = page.locator('input[placeholder*="Tarih"], input[placeholder*="tarih"]');
+
+              if (await dateFields.count()) {
+                await dateFields.first().click();
+              } else {
+                // Sayfadaki tarih alanını metin üzerinden bul
+                await page.getByText("Gidiş Tarihi", {exact: true}).first().click();
+              }
+
+              await page.waitForTimeout(1500);
+
+              // Ağustos 2026 ve 16'sını seç
+              const august = page.getByText("Ağustos 2026", {exact: true});
+              if (await august.count()) {
+                await august.first().click();
+              }
+
+              const day16 = page.getByText("16", {exact: true});
+              await day16.last().click();
+
+              // Yolcu
+              const passenger = page.getByText(/Yolcu Sayısını Seçin/i).first();
+              if (await passenger.count()) {
+                await passenger.click();
+              }
+
+              await page.waitForTimeout(500);
+
+              // 1 yetişkin varsayılan olduğundan tamam
+              const done = page.getByText("TAMAM", {exact: true}).first();
+              if (await done.count()) {
+                await done.click();
+              }
+
+              // Ara
+              const search = page.getByText("UCUZ UÇUŞ ARA", {exact: true}).first();
+              await search.click();
+
+              await page.waitForTimeout(12000);
+
+              await page.screenshot({
+                path: "pegasus-result.png",
+                fullPage: true
+              });
+
+              const text = await page.locator("body").innerText();
+
+              console.log(text);
+
+              // 08:15 uçuşunun bulunduğu bölümden fiyatı yakalamaya çalış
+              const lines = text.split("\n").map(x => x.trim()).filter(Boolean);
+
+              let price = null;
+
+              for (let i = 0; i < lines.length; i++) {
+                if (lines[i].includes("08:15")) {
+                  const nearby = lines.slice(i, i + 25).join(" ");
+                  const match = nearby.match(/([\d.]+,\d{2})\s*TL/);
+
+                  if (match) {
+                    price = parseFloat(
+                      match[1]
+                        .replace(/\./g, "")
+                        .replace(",", ".")
+                    );
+                    break;
+                  }
+                }
+              }
+
+              if (!price) {
+                throw new Error("08:15 uçuşunun fiyatı bulunamadı.");
+              }
+
+              console.log("BULUNAN FİYAT:", price);
+
+              const file = "last_price.txt";
+              let oldPrice = null;
+
+              if (fs.existsSync(file)) {
+                oldPrice = parseFloat(fs.readFileSync(file, "utf8"));
+              }
+
+              fs.writeFileSync(file, String(price));
+
+              if (oldPrice === null) {
+                await telegram(
+                  `✈️ Pegasus fiyat takip başladı\n\n` +
+                  `Çukurova → Sabiha Gökçen\n` +
+                  `16 Ağustos 2026\n` +
+                  `08:15 → 09:50\n\n` +
+                  `İlk fiyat: ${price.toLocaleString("tr-TR")} TL`
+                );
+              } else if (price !== oldPrice) {
+                const difference = price - oldPrice;
+                const percent = (difference / oldPrice) * 100;
+
+                const direction = difference < 0 ? "📉 DÜŞTÜ" : "📈 ARTTI";
+
+                await telegram(
+                  `🔔 PEGASUS FİYAT DEĞİŞTİ\n\n` +
+                  `${direction}\n\n` +
+                  `Çukurova → Sabiha Gökçen\n` +
+                  `16 Ağustos 2026\n` +
+                  `08:15 → 09:50\n\n` +
+                  `Eski fiyat: ${oldPrice.toLocaleString("tr-TR")} TL\n` +
+                  `Yeni fiyat: ${price.toLocaleString("tr-TR")} TL\n` +
+                  `Değişim: ${difference > 0 ? "+" : ""}${difference.toLocaleString("tr-TR")} TL\n` +
+                  `Oran: ${percent.toFixed(2)}%`
+                );
+              }
+
+            } catch (error) {
+              console.error(error);
+
+              await telegram(
+                `⚠️ Pegasus fiyat kontrolünde hata oluştu.\n\n` +
+                `${error.message}`
+              );
+
+              process.exitCode = 1;
+
+            } finally {
+              await browser.close();
+            }
+          })();
+          EOF
+
+          node check.js
+
+      - name: Fiyatı kaydet
+        run: |
+          git config user.name "Pegasus Price Bot"
+          git config user.email "actions@github.com"
+          git add last_price.txt
+          git commit -m "Fiyat güncellendi" || true
+          git push || true

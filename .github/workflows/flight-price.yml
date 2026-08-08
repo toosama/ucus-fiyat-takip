@@ -39,9 +39,13 @@ jobs:
           const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
           const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+          const FLIGHT_DATE = "2026-08-16";
+          const STOP_DATE = "2026-08-12";
+
           async function telegram(message) {
             if (!BOT_TOKEN || !CHAT_ID) {
-              throw new Error("Telegram Secret bilgileri eksik.");
+              console.log("Telegram Secret eksik.");
+              return;
             }
 
             const response = await fetch(
@@ -67,133 +71,232 @@ jobs:
             }
           }
 
-          (async () => {
-            const today = new Date();
+          function normalize(text) {
+            return text
+              .replace(/\u00a0/g, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+          }
 
-            const turkeyDate = new Intl.DateTimeFormat("en-CA", {
-              timeZone: "Europe/Istanbul",
-              year: "numeric",
-              month: "2-digit",
-              day: "2-digit"
-            }).format(today);
+          function extractPrice(text) {
+            const patterns = [
+              /₺\s?([\d.,]+)/gi,
+              /TRY\s?([\d.,]+)/gi,
+              /([\d.,]+)\s?TL/gi
+            ];
 
-            console.log("Türkiye tarihi:", turkeyDate);
+            const values = [];
 
-            if (turkeyDate > "2026-08-12") {
-              console.log("Takip süresi sona erdi.");
-              return;
-            }
-
-            const browser = await chromium.launch({
-              headless: true
-            });
-
-            const context = await browser.newContext({
-              locale: "tr-TR",
-              timezoneId: "Europe/Istanbul"
-            });
-
-            const page = await context.newPage();
-
-            try {
-              console.log("Uçuş kaynağı açılıyor...");
-
-              const url =
-                "https://www.trip.com/flights/airport-cov-saw/";
-
-              await page.goto(url, {
-                waitUntil: "domcontentloaded",
-                timeout: 90000
-              });
-
-              await page.waitForTimeout(8000);
-
-              const text =
-                await page.locator("body").innerText();
-
-              console.log(
-                text.substring(0, 12000)
-              );
-
-              /*
-               * Hedef uçuş:
-               * Pegasus PC2081
-               * COV -> SAW
-               * 08:15 -> 09:50
-               */
-
-              if (!text.includes("PC2081")) {
-                throw new Error(
-                  "PC2081 uçuşu kaynakta bulunamadı."
-                );
-              }
-
-              if (!text.includes("08:15")) {
-                throw new Error(
-                  "08:15 kalkış saati bulunamadı."
-                );
-              }
-
-              if (!text.includes("09:50")) {
-                throw new Error(
-                  "09:50 varış saati bulunamadı."
-                );
-              }
-
-              console.log(
-                "PC2081 / 08:15 / 09:50 bulundu."
-              );
-
-              /*
-               * Burada kaynakta gerçek rezervasyon fiyatı
-               * görünüyorsa TL fiyatını yakalamaya çalış.
-               */
-
-              const priceMatches = [
-                ...text.matchAll(
-                  /(?:₺|TRY|TL)\s?([\d.,]+)/gi
-                )
-              ];
-
-              let price = null;
-
-              for (const match of priceMatches) {
-                const value =
-                  match[1]
-                    .replace(/\./g, "")
-                    .replace(",", ".");
+            for (const pattern of patterns) {
+              for (const match of text.matchAll(pattern)) {
+                let value = match[1]
+                  .replace(/\./g, "")
+                  .replace(",", ".");
 
                 const number = parseFloat(value);
 
                 if (
                   Number.isFinite(number) &&
-                  number > 100 &&
-                  number < 100000
+                  number >= 100 &&
+                  number <= 100000
                 ) {
-                  price = number;
-                  break;
+                  values.push(number);
                 }
               }
+            }
 
-              if (!price) {
+            if (values.length === 0) {
+              return null;
+            }
+
+            return Math.min(...values);
+          }
+
+          (async () => {
+
+            const now = new Date();
+
+            const turkeyDate =
+              new Intl.DateTimeFormat("en-CA", {
+                timeZone: "Europe/Istanbul",
+                year: "numeric",
+                month: "2-digit",
+                day: "2-digit"
+              }).format(now);
+
+            console.log("Türkiye tarihi:", turkeyDate);
+
+            if (turkeyDate > STOP_DATE) {
+              console.log("Takip süresi sona erdi.");
+              return;
+            }
+
+            const browser = await chromium.launch({
+              headless: true,
+              args: [
+                "--no-sandbox",
+                "--disable-setuid-sandbox"
+              ]
+            });
+
+            const context = await browser.newContext({
+              locale: "tr-TR",
+              timezoneId: "Europe/Istanbul",
+              viewport: {
+                width: 1440,
+                height: 1000
+              },
+              userAgent:
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+            });
+
+            const page = await context.newPage();
+
+            try {
+
+              const url =
+                "https://www.trip.com/flights/airport-cov-saw/?date=2026-08-16&curr=TRY&locale=tr-TR";
+
+              console.log("Trip.com açılıyor...");
+              console.log(url);
+
+              const response = await page.goto(url, {
+                waitUntil: "domcontentloaded",
+                timeout: 90000
+              });
+
+              console.log(
+                "HTTP:",
+                response ? response.status() : "bilinmiyor"
+              );
+
+              await page.waitForTimeout(12000);
+
+              const rawText =
+                await page.locator("body").innerText();
+
+              const text = normalize(rawText);
+
+              console.log(
+                "Sayfa uzunluğu:",
+                text.length
+              );
+
+              console.log(
+                text.substring(0, 15000)
+              );
+
+              /*
+               * HEDEF:
+               *
+               * 16 Ağustos 2026
+               * COV -> SAW
+               * Pegasus
+               * 08:15 -> 09:50
+               *
+               * Önce uçuş numarasını arıyoruz.
+               */
+
+              const hasPegasus =
+                /Pegasus/i.test(text);
+
+              const hasRoute =
+                /COV/i.test(text) &&
+                /SAW/i.test(text);
+
+              const hasDeparture =
+                /08[:.]15/.test(text);
+
+              const hasArrival =
+                /09[:.]50/.test(text);
+
+              const hasFlightNumber =
+                /PC\s?2081/i.test(text);
+
+              console.log(
+                "Pegasus:",
+                hasPegasus
+              );
+
+              console.log(
+                "COV:",
+                /COV/i.test(text)
+              );
+
+              console.log(
+                "SAW:",
+                /SAW/i.test(text)
+              );
+
+              console.log(
+                "08:15:",
+                hasDeparture
+              );
+
+              console.log(
+                "09:50:",
+                hasArrival
+              );
+
+              console.log(
+                "PC2081:",
+                hasFlightNumber
+              );
+
+              /*
+               * Önce tam hedefi deniyoruz.
+               */
+
+              const targetFound =
+                hasPegasus &&
+                hasRoute &&
+                hasDeparture &&
+                hasArrival;
+
+              if (!targetFound) {
+
                 console.log(
-                  "Kaynak uçuşu doğruladı fakat rezervasyon TL fiyatı vermedi."
+                  "Hedef uçuş bu sayfa metninde doğrulanamadı."
                 );
 
                 await telegram(
                   "⚠️ Pegasus fiyat kontrolü\n\n" +
-                  "PC2081 bulundu:\n" +
-                  "COV → SAW\n" +
                   "16 Ağustos 2026\n" +
+                  "Çukurova (COV) → Sabiha Gökçen (SAW)\n" +
                   "08:15 → 09:50\n\n" +
-                  "Ancak kaynakta güncel TL satış fiyatı bulunamadı."
+                  "Uçuş sayfası açıldı ancak hedef uçuş bilgileri sayfada doğrulanamadı.\n\n" +
+                  "Kontrol devam edecek."
+                );
+
+                return;
+              }
+
+              /*
+               * TL fiyatı ara.
+               */
+
+              const price = extractPrice(text);
+
+              if (!price) {
+
+                console.log(
+                  "Uçuş bulundu ancak TL fiyatı alınamadı."
+                );
+
+                await telegram(
+                  "⚠️ Pegasus fiyat kontrolü\n\n" +
+                  "Hedef uçuş bulundu:\n" +
+                  "16 Ağustos 2026\n" +
+                  "COV → SAW\n" +
+                  "08:15 → 09:50\n\n" +
+                  "Ancak güncel TL fiyatı sayfadan alınamadı."
                 );
 
                 return;
               }
 
               console.log(
-                "Bulunan fiyat:",
+                "GÜNCEL FİYAT:",
                 price,
                 "TL"
               );
@@ -204,9 +307,19 @@ jobs:
               let oldPrice = null;
 
               if (fs.existsSync(file)) {
-                oldPrice = parseFloat(
-                  fs.readFileSync(file, "utf8")
-                );
+
+                const old =
+                  fs.readFileSync(
+                    file,
+                    "utf8"
+                  ).trim();
+
+                const parsed =
+                  parseFloat(old);
+
+                if (Number.isFinite(parsed)) {
+                  oldPrice = parsed;
+                }
               }
 
               fs.writeFileSync(
@@ -214,18 +327,28 @@ jobs:
                 String(price)
               );
 
+              /*
+               * İlk fiyat.
+               */
+
               if (oldPrice === null) {
+
                 await telegram(
                   "✈️ PEGASUS FİYAT TAKİBİ BAŞLADI\n\n" +
-                  "PC2081\n" +
-                  "Çukurova → Sabiha Gökçen\n" +
                   "16 Ağustos 2026\n" +
+                  "Çukurova (COV) → Sabiha Gökçen (SAW)\n" +
                   "08:15 → 09:50\n\n" +
-                  `İlk fiyat: ${price.toLocaleString("tr-TR")} TL`
+                  `Güncel fiyat: ${price.toLocaleString("tr-TR")} TL`
                 );
+
               }
 
+              /*
+               * Fiyat düştü veya arttı.
+               */
+
               else if (price !== oldPrice) {
+
                 const difference =
                   price - oldPrice;
 
@@ -237,44 +360,44 @@ jobs:
                 await telegram(
                   "🔔 PEGASUS FİYAT DEĞİŞTİ\n\n" +
                   `${direction}\n\n` +
-                  "PC2081\n" +
-                  "Çukurova → Sabiha Gökçen\n" +
                   "16 Ağustos 2026\n" +
+                  "Çukurova (COV) → Sabiha Gökçen (SAW)\n" +
                   "08:15 → 09:50\n\n" +
-                  `Eski: ${oldPrice.toLocaleString("tr-TR")} TL\n` +
-                  `Yeni: ${price.toLocaleString("tr-TR")} TL\n` +
+                  `Eski fiyat: ${oldPrice.toLocaleString("tr-TR")} TL\n` +
+                  `Yeni fiyat: ${price.toLocaleString("tr-TR")} TL\n` +
                   `Değişim: ${difference > 0 ? "+" : ""}${difference.toLocaleString("tr-TR")} TL`
                 );
+
               }
 
               else {
+
                 console.log(
-                  "Fiyat değişmedi."
+                  "Fiyat değişmedi:",
+                  price,
+                  "TL"
                 );
               }
+
+            } catch (error) {
+
+              console.error(
+                "Kontrol hatası:",
+                error.message
+              );
+
+              await telegram(
+                "⚠️ Pegasus fiyat kontrolünde hata:\n\n" +
+                error.message
+              );
 
             } finally {
+
               await browser.close();
-            }
-          })().catch(async error => {
-            console.error(error);
 
-            if (BOT_TOKEN && CHAT_ID) {
-              try {
-                await telegram(
-                  "⚠️ Pegasus fiyat kontrolünde hata:\n\n" +
-                  error.message
-                );
-              } catch (telegramError) {
-                console.error(
-                  "Telegram bildirimi gönderilemedi:",
-                  telegramError.message
-                );
-              }
             }
 
-            process.exitCode = 1;
-          });
+          })();
           EOF
 
           node check.js
